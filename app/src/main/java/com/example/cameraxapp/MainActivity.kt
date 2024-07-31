@@ -20,7 +20,6 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageProxy
-//import androidx.camera.core.R
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import com.example.cameraxapp.databinding.ActivityMainBinding
@@ -31,22 +30,42 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import android.graphics.*
-import android.os.SystemClock
+import android.graphics.Bitmap
 import android.util.Log
-import androidx.compose.ui.graphics.asAndroidBitmap
 import java.nio.FloatBuffer
 import java.util.Collections
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.GET
+import retrofit2.http.Query
+import okhttp3.ResponseBody
 
-const val DIM_BATCH_SIZE = 1;
-const val DIM_PIXEL_SIZE = 3;
-const val IMAGE_SIZE_X = 320;
-const val IMAGE_SIZE_Y = 240;
+const val DIM_BATCH_SIZE = 1
+const val DIM_PIXEL_SIZE = 3
+const val IMAGE_SIZE_X = 320
+const val IMAGE_SIZE_Y = 240
 
+
+interface ApiService {
+    @GET("servo")
+    suspend fun setServoAngles(
+        @Query("angle1") angle1: Int,
+        @Query("angle2") angle2: Int
+    ): ResponseBody
+}
+
+object RetrofitClient {
+    private val retrofit = Retrofit.Builder()
+        .baseUrl("http://192.168.4.31/")  // Replace with the IP address of your ESP32
+        .addConverterFactory(GsonConverterFactory.create())
+        .build()
+
+    val apiService: ApiService = retrofit.create(ApiService::class.java)
+}
 
 class MainActivity : ComponentActivity() {
     private lateinit var viewBinding: ActivityMainBinding
-    private lateinit var overlayView: OverlayView // Add a reference to the OverlayView
+    private lateinit var overlayView: OverlayView
 
     private val backgroundExecutor: ExecutorService by lazy { Executors.newSingleThreadExecutor() }
     private val scope = CoroutineScope(Job() + Dispatchers.Main)
@@ -60,7 +79,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         viewBinding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(viewBinding.root)
-        overlayView = findViewById(R.id.overlayView) // Initialize the OverlayView
+        overlayView = findViewById(R.id.overlayView)
         ortEnv = OrtEnvironment.getEnvironment()
 
         if (!hasPermissions(baseContext)) {
@@ -95,7 +114,7 @@ class MainActivity : ComponentActivity() {
             this, cameraSelector, preview, imageCapture, imageAnalysis
         )
 
-        setORTAnalyzer() // Initialize ORTAnalyzer
+        setORTAnalyzer()
     }
 
     private val activityResultLauncher =
@@ -138,15 +157,47 @@ class MainActivity : ComponentActivity() {
 
     private fun updateUI(result: List<Float>) {
         if (result.isEmpty()) return
-        val left = result[0] * overlayView.width
+        val left = (1 - result[2]) * overlayView.width
         val top = result[1] * overlayView.height
-        val right = result[2] * overlayView.width
+        val right = (1 - result[0]) * overlayView.width
         val bottom = result[3] * overlayView.height
+
+        // Calculate the center of the bounding box
+        val centerX = (left + right) / 2
+        val centerY = (top + bottom) / 2
+
+        // Map the center coordinates to angles (0 to 180)
+        val angleX = (centerX / overlayView.width) * 180
+        val angleY = (centerY / overlayView.height) * 180
+
+        // Convert to integer values
+        val angle1Int = angleX.toInt()
+        val angle2Int = angleY.toInt()
+
+        // Make the GET request using Retrofit
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = RetrofitClient.apiService.setServoAngles(angle1Int, angle2Int).string()
+                withContext(Dispatchers.Main) {
+                    // Handle the response
+//                    responseText = response
+                    Log.d("MainActivity", "Response: $response")
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    // Handle the error
+//                    responseText = e.message ?: "Error"
+                    Log.d("MainActivity", "Response: $e.message")
+
+                }
+            }
+        }
 
         runOnUiThread {
             overlayView.updateRect(left, top, right, bottom)
         }
     }
+
 
     private suspend fun readModel(): ByteArray = withContext(Dispatchers.IO) {
         val modelID = R.raw.face_detector
@@ -172,38 +223,16 @@ class MainActivity : ComponentActivity() {
         private val ortSession: OrtSession?,
         private val callBack: (List<Float>) -> Unit
     ) : ImageAnalysis.Analyzer {
-
-        // Rotate the image of the input bitmap
-        fun Bitmap.rotate(degrees: Float): Bitmap {
-            val matrix = Matrix().apply { postRotate(degrees) }
-            return Bitmap.createBitmap(this, 0, 0, width, height, matrix, true)
-        }
-
         override fun analyze(image: ImageProxy) {
             val imgBitmap = image.toBitmap()
-            val rawBitmap = imgBitmap.let { Bitmap.createScaledBitmap(it, 320, 240, false) }
 
-            val bitmap = rawBitmap.rotate(image.imageInfo.rotationDegrees.toFloat())
-
-//            val rawBitmap = imgBitmap.let { Bitmap.createScaledBitmap(it, 320 , 240, false) }
-
-            // Run inference here and get the bounding box coordinates
             val inputName = ortSession?.inputNames?.iterator()?.next()
-            Log.d("ORTImageClassifier", "inputName: $inputName")
-            val shape = longArrayOf(1, 3, 224, 224)
             val env = OrtEnvironment.getEnvironment()
             env.use {
-                val tensor = createTensorFromImage(bitmap)
-//                val tensor = OnnxTensor.createTensor(env, imgData, shape)
-//                val startTime = SystemClock.uptimeMillis()
+                val tensor = createTensorFromImage(imgBitmap)
                 tensor.use {
                     val results = ortSession?.run(Collections.singletonMap(inputName, tensor))
-                    // log resultes
-                    Log.d("ORTImageClassifier", "sess $ortSession results: $results")
                     results.use {
-//                        val feeds = mapOf(inputName to tensor)
-
-//                        val results = ortSession?.run(feeds)
                         val scores =
                             (results?.get(0)?.value as Array<Array<FloatArray>>)[0]
                         val boxes =
@@ -212,18 +241,10 @@ class MainActivity : ComponentActivity() {
 
                         if (filtered_boxes.isEmpty()) {
                             image.close()
-
                             return
                         }
                         val result = filtered_boxes.first()
-                        Log.d("ORTImageClassifier", "result: $result")
                         callBack(result)
-
-                        //                        val probabilities = softMax(rawOutput)
-//                        result.detectedIndices = getTop3(probabilities)
-//                        for (idx in result.detectedIndices) {
-//                            result.detectedScore.add(probabilities[idx])
-//                        }
                     }
                 }
             }
@@ -262,24 +283,14 @@ class OverlayView(context: Context, attrs: AttributeSet?) : View(context, attrs)
     }
 }
 
-
 private fun createTensorFromImage(imageBitmap: Bitmap): OnnxTensor {
     val width = 320
     val height = 240
     val input = FloatArray(1 * 3 * height * width)
     val bitmap = imageBitmap.let { Bitmap.createScaledBitmap(imageBitmap, 320, 240, false) }
-//    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-//    val canvas = android.graphics.Canvas(bitmap)
-//    canvas.drawBitmap(
-//        imageBitmap.asAndroidBitmap(),
-//        null,
-//        Rect(0, 0, width, height),
-//        null
-//    )
 
     val pixels = IntArray(width * height)
     bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-    Log.d("ORTImageClassifier", "pixels: ${pixels.size}")
 
     for (i in 0 until height) {
         for (j in 0 until width) {
@@ -294,21 +305,9 @@ private fun createTensorFromImage(imageBitmap: Bitmap): OnnxTensor {
         }
     }
 
-    // logd the first couple pixels
-    for (i in 0 until 2)
-        for (j in 0 until 2)
-            Log.d(
-                "ORTImageClassifier",
-                "pixel: ${input[(0 * height + i) * width + j]} ${input[(1 * height + i) * width + j]} ${input[(2 * height + i) * width + j]}"
-            )
-
-
     val env = OrtEnvironment.getEnvironment()
     val shape = longArrayOf(1, 3, height.toLong(), width.toLong())
-    val tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(input), shape)
-
-    return tensor
-
+    return OnnxTensor.createTensor(env, FloatBuffer.wrap(input), shape)
 }
 
 fun nonMaxSuppression(

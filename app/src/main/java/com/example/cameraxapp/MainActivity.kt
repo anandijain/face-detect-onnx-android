@@ -172,8 +172,19 @@ class MainActivity : ComponentActivity() {
         private val ortSession: OrtSession?,
         private val callBack: (List<Float>) -> Unit
     ) : ImageAnalysis.Analyzer {
+
+        // Rotate the image of the input bitmap
+        fun Bitmap.rotate(degrees: Float): Bitmap {
+            val matrix = Matrix().apply { postRotate(degrees) }
+            return Bitmap.createBitmap(this, 0, 0, width, height, matrix, true)
+        }
+
         override fun analyze(image: ImageProxy) {
             val imgBitmap = image.toBitmap()
+            val rawBitmap = imgBitmap.let { Bitmap.createScaledBitmap(it, 320, 240, false) }
+
+            val bitmap = rawBitmap.rotate(image.imageInfo.rotationDegrees.toFloat())
+
 //            val rawBitmap = imgBitmap.let { Bitmap.createScaledBitmap(it, 320 , 240, false) }
 
             // Run inference here and get the bounding box coordinates
@@ -182,7 +193,7 @@ class MainActivity : ComponentActivity() {
             val shape = longArrayOf(1, 3, 224, 224)
             val env = OrtEnvironment.getEnvironment()
             env.use {
-                val tensor = createTensorFromImage(imgBitmap)
+                val tensor = createTensorFromImage(bitmap)
 //                val tensor = OnnxTensor.createTensor(env, imgData, shape)
 //                val startTime = SystemClock.uptimeMillis()
                 tensor.use {
@@ -200,6 +211,8 @@ class MainActivity : ComponentActivity() {
                         val filtered_boxes = nonMaxSuppression(boxes, scores, 0.5f, 0.5f)
 
                         if (filtered_boxes.isEmpty()) {
+                            image.close()
+
                             return
                         }
                         val result = filtered_boxes.first()
